@@ -30,8 +30,12 @@ description: 这是一个用于与 HuggingFace 服务器进行交互和管理的
   - 新建/删除：`python scripts/manage_datasets.py [create|delete] <name>`
 - **数据持久化 SDK (Persistence Layer)**：
   - **原理**：利用私有 HF Dataset 作为后端存储，解决 Space 重启丢失数据的问题。
-  - **组件**：`scripts/persistence_manager.py` (内含 `PersistenceManager` 类)
-  - **用法**：在应用启动时调用 `pm.restore()`，数据变更时调用 `pm.save()`。
+  - **容量与限制**：
+    - **存储空间**：免费账户私有 Dataset 通常支持 **100GB - 500GB**（单文件上限 500GB，建议分块）。
+    - **文件数量**：建议总文件数 < 100,000，单个文件夹 < 10,000。
+    - **API 频率**：支持高频读取，但**写入（Commit/Upload）**建议控制在 **分钟级**。Git 提交过于频繁（如每秒多次）可能触发 429 Rate Limit。
+  - **组件**：`scripts/persistence_manager.py` (内含 `PersistenceManager` 类)。
+  - **用法**：在应用启动时调用 `pm.restore()`，数据变更（如每隔 5-10 分钟或清理时）调用 `pm.save()`。
 - 在调用任何 API 时，优先检查是否存在 `HF_TOKEN` 环境变量。
 
 ## Constraints
