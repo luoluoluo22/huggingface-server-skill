@@ -25,10 +25,22 @@ description: 这是一个用于与 HuggingFace 服务器进行交互和管理的
   - **私密环境变量/Secrets读写**：
     - 读取现存键名：`python scripts/manage_spaces.py secrets <space_name> --get` （只会取回名，不会暴露值）
     - 写入变量配置：`python scripts/manage_spaces.py secrets <space_name> --set_key OPENAI_API_KEY --set_value sk-xxxxx` （如代理应用的配置源等）
-  - **日志获取**：`python scripts/manage_spaces.py logs <space_name>` （实时拉取最近 100 行运行日志，用于排查 Runtime Error）
+  - **获取日志**：`python scripts/manage_spaces.py logs <space_name>` （由于官方 SDK 已集成，现在支持更全的日志获取）
   - **硬件规格管理**：
     - 查询当前规格：`python scripts/manage_spaces.py hardware <space_name>`
     - 切换硬件规格：`python scripts/manage_spaces.py hardware <space_name> --set t4-small` （用于高性能推理任务切换）
+  - **数据持久化系统 (Persistence Layer)**：
+    - **原理**：利用私有 HF Dataset 作为后端存储，解决 Space 重启丢失数据的问题。
+    - **基本用法**（在 Space 启动代码中使用）：
+      ```python
+      from scripts.persistence_manager import PersistenceManager
+      pm = PersistenceManager("your-username/private-dataset-id")
+      # 1. 启动时恢复数据
+      pm.restore("db/data.sqlite", "./local_data.db")
+      # 2. 变更时保存备份
+      pm.save("./local_data.db", "db/data.sqlite")
+      ```
+    - **手工操作**：`python scripts/persistence_manager.py save <本地文件> <云端路径>`
 - 在调用任何 API 时，优先检查是否存在 `HF_TOKEN` 环境变量。
 
 ## Constraints
