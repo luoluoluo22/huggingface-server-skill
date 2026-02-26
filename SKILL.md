@@ -1,16 +1,28 @@
 ---
 name: huggingface-server-skill
-description: 这是一个用于与 HuggingFace 服务器进行交互和管理的技能。可以按需在此扩展具体的功能脚本。
+description: 这是一个用于与 HuggingFace 服务器进行交互和管理的技能。当用户需要测试与HuggingFace的连接、管理模型/空间，或者调用HuggingFace API时触发此技能。
 ---
 
 # HuggingFace Server Skill
 
 ## Goal
-管理、测试或部署 HuggingFace 相关的服务和内容。
+管理、测试或部署 HuggingFace 相关的服务和内容，以及测试与 HuggingFace 平台的连接状态。
+
+## Authentication (认证连接)
+要与 HuggingFace 建立连接，需要提供有效的 Access Token (`HF_TOKEN`)。
+- 建议用户将 `HF_TOKEN` 配置在系统的环境变量中。
+- 所有需要访问个人账户、私有模型或创建修改资源的请求，均需附带此 Token 进行 Bearer 认证。
+- 如果请求需要连接特定的 Endpoint URL (例如 Inference Endpoints)，需要同时确保使用相应的 URL 请求地址。
 
 ## Instructions
-- 根据用户的自然语言请求意图，管理对应的服务。
-- 使用相关的 Python 或 PowerShell 脚本。
+- 根据用户的自然语言请求意图，分析所需的 HuggingFace 交互意图（如：测试连接、下载模型、查询账户信息）。
+- 当用户要求测试或建立连接时，执行 `scripts/test_hf_connection.py` 脚本来验证 `HF_TOKEN` 的有效性以及网络连通性。
+  - 命令示例：`python scripts/test_hf_connection.py` 
+- **Space 管理**：当用户想要查询 Spaces 列表（运行状态）或重启某个特定 Space 时，请使用 `scripts/manage_spaces.py`。
+  - 列出 Spaces 极其运行状态：`python scripts/manage_spaces.py list`
+  - 重启特定的 Space：`python scripts/manage_spaces.py restart <space_name>`
+- 在调用任何 API 时，优先检查是否存在 `HF_TOKEN` 环境变量。
 
 ## Constraints
-- 确保不在日志中输出任何私密的授权 token。
+- 绝不在最终输出和日志中明文打印任何私密的授权 token (`HF_TOKEN`)。
+- 如果请求返回的内容超过 50 行，适度总结结果，不要直接将整篇长 JSON 输出给用户。
