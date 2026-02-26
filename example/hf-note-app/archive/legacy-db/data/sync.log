@@ -1,0 +1,5 @@
+[*] 开始云端拉取 (Dataset: mingyang22/huggingface-notes, Branch: main)...
+正在从 [mingyang22/huggingface-notes] 恢复数据: db/notes.db -> f:\Desktop\kaifa\hf-note-app\scripts\..\data\notes.db...
+notes.db:   0%|          | 0.00/12.3k [00:00<?, ?B/s]notes.db: 100%|##########| 12.3k/12.3k [00:00<00:00, 8.03MB/s]
+✅ 恢复完成。
+[OK] 恢复完成。本地 DB 状态: 已更新 (Thu Feb 26 22:45:20 2026)

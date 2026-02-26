@@ -1,0 +1,60 @@
+﻿{
+  "ActionId": "2378abe7-90f4-4e21-9b46-1fe32a7e2fc1",
+  "SharedActionId": "00000000-0000-0000-0000-000000000000",
+  "Title": "HF 笔记同步",
+  "Description": "本地笔记同步助手：支持将本地数据备份至 Hugging Face。点击直接记事，右键同步云端。",
+  "Keywords": "note;huggingface;sync;backup",
+  "ChangeLog": "v1.0.1 修复编译错误，改用原生变量输入流。",
+  "Icon": "fa:Solid_Notebook:#00A0FF",
+  "Variables": [
+    {
+      "Type": 0,
+      "Key": "content",
+      "DefaultValue": "",
+      "IsInput": true,
+      "Desc": "笔记内容"
+    },
+    {
+      "Type": 0,
+      "Key": "title",
+      "DefaultValue": "新笔记",
+      "IsInput": true,
+      "Desc": "笔记标题"
+    },
+    {
+      "Type": 0,
+      "Desc": "结果文本(自动)",
+      "IsOutput": false,
+      "Key": "text"
+    },
+    {
+      "Type": 0,
+      "Desc": "返回值(自动)",
+      "IsOutput": false,
+      "Key": "rtn"
+    },
+    {
+      "Type": 0,
+      "Desc": "错误信息(自动)",
+      "IsOutput": false,
+      "Key": "errMessage"
+    },
+    {
+      "Type": 0,
+      "Desc": "菜单参数(自动)",
+      "IsOutput": false,
+      "Key": "menuKey"
+    },
+    {
+      "Type": 2,
+      "Desc": "静默启动",
+      "DefaultValue": "true",
+      "IsInput": false,
+      "Key": "silent"
+    }
+  ],
+  "Menus": {
+    "sync_down": "[fa:Solid_CloudDownloadAlt]从云端拉取存档",
+    "sync_up": "[fa:Solid_CloudUploadAlt]备份到云端存档"
+  }
+}
