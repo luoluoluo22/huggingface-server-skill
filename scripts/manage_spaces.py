@@ -190,43 +190,6 @@ def manage_hardware(space_id, flavor=None):
     except Exception as e:
         print(f"❌ 硬件管理失败: {e}")
 
-def list_datasets():
-    api = get_api()
-    username = get_username(api)
-    print(f"正在拉取 {username} 的 Datasets (数据库) 列表...\n")
-    try:
-        datasets = api.list_datasets(author=username)
-        print(f"{'Dataset 名称':<30} | {'私有':<5} | {'最后更新':<25}")
-        print("-" * 70)
-        for ds in datasets:
-            name = ds.id.split("/")[-1]
-            is_private = "Yes" if ds.private else "No"
-            last_modified = getattr(ds, 'lastModified', 'N/A')
-            print(f"{name:<30} | {is_private:<5} | {last_modified}")
-        print("-" * 70)
-    except Exception as e:
-        print(f"获取 Datasets 列表失败: {e}")
-
-def list_dataset_files(dataset_id):
-    api = get_api()
-    if "/" not in dataset_id:
-        username = get_username(api)
-        repo_id = f"{username}/{dataset_id}"
-    else:
-        repo_id = dataset_id
-        
-    print(f"正在查看数据库 [{repo_id}] 内部的文件/备份内容...")
-    try:
-        files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-        if not files:
-            print("该数据库目前为空。")
-        else:
-            for f in files:
-                if f.startswith(".") or f == ".gitattributes": continue
-                print(f" 📂 {f}")
-    except Exception as e:
-        print(f"获取文件列表失败: {e}")
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HuggingFace Space 官方 SDK 管理专家")
     subparsers = parser.add_subparsers(dest="command")
@@ -256,11 +219,6 @@ if __name__ == "__main__":
     parser_hw.add_argument("space_id")
     parser_hw.add_argument("--set")
 
-    # dataset commands
-    parser_ds = subparsers.add_parser("dataset", help="数据库 (Dataset) 管理")
-    parser_ds.add_argument("--list", action="store_true", help="列出所有数据库")
-    parser_ds.add_argument("--view", help="查看特定数据库内部的文件列表")
-
     args = parser.parse_args()
     
     if args.command == "list": list_spaces()
@@ -270,11 +228,4 @@ if __name__ == "__main__":
         manage_config(args.space_id, args.type, args.key, args.val)
     elif args.command == "logs": get_logs(args.space_id)
     elif args.command == "hardware": manage_hardware(args.space_id, args.set)
-    elif args.command == "dataset":
-        if args.list:
-            list_datasets()
-        elif args.view:
-            list_dataset_files(args.view)
-        else:
-            print("❌ 请使用 --list 或 --view [dataset_id]")
     else: parser.print_help()
