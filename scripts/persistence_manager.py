@@ -27,31 +27,39 @@ class PersistenceManager:
             if is_folder:
                 # 确保本地目录存在
                 os.makedirs(local_path, exist_ok=True)
-                # 这里的逻辑稍复杂，官方 SDK 并没有直接对应 restore_folder，
-                # 通常是下载整个 Repo 或逐个获取。
-                # 简化处理：要求用户明确指定关键文件或使用 snapshot_download。
                 from huggingface_hub import snapshot_download
                 snapshot_download(
                     repo_id=self.dataset_id,
                     repo_type="dataset",
                     local_dir=local_path,
-                    allow_patterns=f"{remote_path}/*"
+                    allow_patterns=f"{remote_path}/*",
+                    token=self.api.token
                 )
             else:
-                # 下载单文件
+                # 尝试拉取最新单文件
+                print(f"[*] 正在从云端拉取文件 ({self.dataset_id}): {remote_path}...")
+                
+                # 下载单文件 (强制刷新缓存)
                 downloaded_path = hf_hub_download(
                     repo_id=self.dataset_id,
                     repo_type="dataset",
-                    filename=remote_path
+                    filename=remote_path,
+                    token=self.api.token,
+                    force_download=True,
+                    revision="main" 
                 )
-                # 移动到目标位置
+                
+                # 复制并验证
                 target = Path(local_path)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(downloaded_path, local_path)
+                
+                file_size = os.path.getsize(local_path)
+                print(f"[OK] 文件已更新: {local_path} (Size: {file_size} bytes)")
             
-            print("✅ 恢复完成。")
+            print("[OK] 恢复完成。")
         except Exception as e:
-            print(f"⚠️ 恢复失败（可能是文件尚不存在）: {e}")
+            print(f"[Warning] 恢复错误: {e}")
 
     def save(self, local_path, remote_path, is_folder=False, commit_message="Persist data from Space"):
         """
@@ -78,9 +86,9 @@ class PersistenceManager:
                     repo_type="dataset",
                     commit_message=commit_message
                 )
-            print("✅ 备份成功。")
+            print("[OK] 备份成功。")
         except Exception as e:
-            print(f"❌ 备份失败: {e}")
+            print(f"[Error] 备份失败: {e}")
 
 if __name__ == "__main__":
     # 简单的 CLI 测试示例

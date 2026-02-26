@@ -1,383 +1,515 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Threading.Tasks;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Markup;
+using System.Diagnostics;
+using Quicker.Public;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using Quicker.Public;
+using System.Text.RegularExpressions;
 
 public static void Exec(IStepContext context)
 {
     Application.Current.Dispatcher.Invoke(() =>
     {
-        string projectRoot = @"f:\Desktop\kaifa\huggingface-server-skill\example\hf-note-app";
-        string dataDir = Path.Combine(projectRoot, "data");
+        // --- 1. 基础配置与路径 ---
+        string dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HFNoteSync");
         string localNotesFile = Path.Combine(dataDir, "notes.json");
+        string configFile = Path.Combine(dataDir, ".config");
         string datasetId = "mingyang22/huggingface-notes";
         string remoteNotesPath = "db/notes.json";
         string token = Environment.GetEnvironmentVariable("HF_TOKEN");
 
         Directory.CreateDirectory(dataDir);
-        EnsureLocalStore(localNotesFile);
 
+        // --- 2. 状态变量 ---
+        var noteData = new ObservableCollection<NoteModel>();
+        string currentFilter = "all"; // all, pinned, trash
+        bool isNavCollapsed = false;
+        double winWidth = 1000, winHeight = 650;
+        double winLeft = double.NaN, winTop = double.NaN;
+        
+        // 从配置加载窗口状态
+        if (File.Exists(configFile)) {
+            try {
+                var lines = File.ReadAllLines(configFile);
+                foreach(var l in lines) {
+                    var parts = l.Split('=');
+                    if(parts.Length == 2) {
+                        string key = parts[0].Trim();
+                        string val = parts[1].Trim();
+                        if(key == "Width") double.TryParse(val, out winWidth);
+                        if(key == "Height") double.TryParse(val, out winHeight);
+                        if(key == "Left") double.TryParse(val, out winLeft);
+                        if(key == "Top") double.TryParse(val, out winTop);
+                        if(key == "IsNavCollapsed") bool.TryParse(val, out isNavCollapsed);
+                    }
+                }
+            } catch {}
+        }
+
+        // --- 3. 核心 XAML 还原 (1:1 ClassNote 玻璃风格) ---
         string xaml = @"
 <Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
         xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
-        Title='HF 笔记同步客户端' Height='550' Width='750'
-        WindowStartupLocation='CenterScreen' Topmost='True' Background='#1A1A1A' Foreground='White'>
-    <Grid Margin='20'>
-        <Grid.RowDefinitions>
-            <RowDefinition Height='Auto'/>
-            <RowDefinition Height='Auto'/>
-            <RowDefinition Height='Auto'/>
-            <RowDefinition Height='*'/>
-            <RowDefinition Height='Auto'/>
-        </Grid.RowDefinitions>
+        Title='HF Note Sync' Height='650' Width='1000'
+        AllowsTransparency='True' WindowStyle='None' 
+        ResizeMode='CanResize' Background='Transparent'
+        WindowStartupLocation='CenterScreen'>
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key='BoolToVis'/>
+        <SolidColorBrush x:Key='BgDark' Color='#0A0A0A'/>
+        <SolidColorBrush x:Key='AccentBlue' Color='#3B82F6'/>
+        <LinearGradientBrush x:Key='GradientAI' StartPoint='0,0' EndPoint='1,1'>
+            <GradientStop Color='#7C3AED' Offset='0.0'/><GradientStop Color='#DB2777' Offset='1.0'/>
+        </LinearGradientBrush>
+        <!-- Icons -->
+        <Geometry x:Key='Icon_All'>M14,17H7V15H14M17,13H7V11H17M17,9H7V7H17M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3Z</Geometry>
+        <Geometry x:Key='Icon_Star'>M12,17.27L18.18,21L16.54,13.97L22,9.24L14.81,8.62L12,2L9.19,8.62L2,9.24L7.45,13.97L5.82,21L12,17.27Z</Geometry>
+        <Geometry x:Key='Icon_Trash'>M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z</Geometry>
+        <Geometry x:Key='Icon_Pin'>M16,12V4H17V2H7V4H8V12L6,14V16H11.2V22H12.8V16H18V14L16,12Z</Geometry>
+        <Geometry x:Key='Icon_Sync'>M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z</Geometry>
+        <Geometry x:Key='Icon_Magic'>M12.5,5.6L10,0L7.5,5.6L1.9,8.1L7.5,10.6L10,16.2L12.5,10.6L18.1,8.1L12.5,5.6M19.1,11.9L17.5,8.1L15.9,11.9L12.1,13.5L15.9,15.1L17.5,18.9L19.1,15.1L22.9,13.5L19.1,11.9Z</Geometry>
+        <Geometry x:Key='Icon_Plus'>M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z</Geometry>
+        <Geometry x:Key='Icon_Close'>M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z</Geometry>
 
-        <TextBlock Text='HF 笔记同步 (Pure C#)' FontSize='20' FontWeight='Bold' Margin='0,0,0,20' Foreground='#00A0FF'/>
+        <!-- Styles -->
+        <Style x:Key='NavButtonStyle' TargetType='RadioButton'>
+            <Setter Property='Background' Value='Transparent'/><Setter Property='Foreground' Value='#888'/><Setter Property='Height' Value='40'/><Setter Property='Margin' Value='0,0,0,5'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='RadioButton'>
+                        <Border x:Name='BtnBorder' Background='{TemplateBinding Background}' CornerRadius='8'>
+                            <Grid>
+                                <Border x:Name='ActiveBar' Width='3' Background='#3B82F6' HorizontalAlignment='Left' Visibility='Collapsed' Margin='0,8,0,8'/>
+                                <StackPanel Orientation='Horizontal' Margin='15,0,0,0' VerticalAlignment='Center' x:Name='BtnStack'>
+                                    <Viewbox Width='16' Height='16'><Path Data='{Binding Tag, RelativeSource={RelativeSource TemplatedParent}}' Fill='{TemplateBinding Foreground}' Stretch='Uniform'/></Viewbox>
+                                    <TextBlock x:Name='BtnText' Text='{TemplateBinding Content}' Margin='15,0,0,0' FontSize='14' VerticalAlignment='Center' Foreground='{TemplateBinding Foreground}' FontWeight='Medium'/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsMouseOver' Value='True'><Setter Property='Background' Value='#1A1A1A'/><Setter Property='Foreground' Value='White'/></Trigger>
+                            <Trigger Property='IsChecked' Value='True'><Setter Property='Background' Value='#252525'/><Setter Property='Foreground' Value='White'/><Setter TargetName='ActiveBar' Property='Visibility' Value='Visible'/></Trigger>
+                            <DataTrigger Binding='{Binding Content, RelativeSource={RelativeSource Self}}' Value=''>
+                                <Setter TargetName='BtnText' Property='Visibility' Value='Collapsed'/>
+                                <Setter TargetName='BtnStack' Property='Margin' Value='0,0,0,0'/>
+                                <Setter TargetName='BtnStack' Property='HorizontalAlignment' Value='Center'/>
+                            </DataTrigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-        <Grid Grid.Row='1' Margin='0,0,0,10'>
+        <Style x:Key='NoteItemStyle' TargetType='ListBoxItem'>
+            <Setter Property='Background' Value='Transparent'/><Setter Property='Margin' Value='0,0,0,10'/><Setter Property='Padding' Value='0'/><Setter Property='BorderThickness' Value='0'/><Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='ListBoxItem'>
+                        <Border x:Name='ItemBorder' Background='{TemplateBinding Background}' CornerRadius='10' Padding='15'>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width='*'/><ColumnDefinition Width='Auto'/></Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text='{Binding Title}' Foreground='White' FontWeight='Bold' FontSize='13' Margin='0,0,0,5'/>
+                                    <TextBlock Text='{Binding Preview}' Foreground='#888' FontSize='12' TextTrimming='CharacterEllipsis'/>
+                                </StackPanel>
+                                <Viewbox Grid.Column='1' Width='12' Height='12' VerticalAlignment='Top' Visibility='{Binding IsPinned, Converter={StaticResource BoolToVis}}'>
+                                    <Path Data='{StaticResource Icon_Star}' Fill='#E0AB2B' Stretch='Uniform'/>
+                                </Viewbox>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsSelected' Value='True'><Setter Property='Background' Value='#252525'/></Trigger>
+                            <Trigger Property='IsMouseOver' Value='True'><Setter Property='Background' Value='#1A1A1A'/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border CornerRadius='16' Background='{StaticResource BgDark}' BorderBrush='#333' BorderThickness='1'>
+        <Grid>
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width='Auto'/>
-                <ColumnDefinition Width='*'/>
-                <ColumnDefinition Width='Auto'/>
+                <ColumnDefinition x:Name='ColNav' Width='200'/><ColumnDefinition Width='250'/><ColumnDefinition Width='*'/>
             </Grid.ColumnDefinitions>
-            <TextBlock Text='历史:' VerticalAlignment='Center' Width='40'/>
-            <ComboBox x:Name='CbHistory' Grid.Column='1' Background='#2D2D2D' Foreground='White' BorderBrush='#444' Padding='5'/>
-            <Button x:Name='BtnRefresh' Grid.Column='2' Content='刷新' Margin='10,0,0,0' Padding='10,5' Background='#333' Foreground='White' BorderThickness='0'/>
+
+            <!-- Column 0: Navigation -->
+            <Grid x:Name='NavGrid' Grid.Column='0' Margin='5,20'>
+                <Grid.RowDefinitions><RowDefinition Height='Auto'/><RowDefinition Height='*'/><RowDefinition Height='Auto'/></Grid.RowDefinitions>
+                <StackPanel Orientation='Horizontal' Margin='10,0,0,30' x:Name='TitlePanel'>
+                    <TextBlock x:Name='AppTitle' Text='HF Note' Foreground='White' FontSize='18' FontWeight='Bold' VerticalAlignment='Center'/>
+                    <Button x:Name='BtnNavToggle' Width='24' Height='24' Background='Transparent' BorderThickness='0' Foreground='#888' Margin='15,0,0,0' Cursor='Hand' VerticalAlignment='Center'>
+                        <Path Data='M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z' Fill='#888' Stretch='Uniform'/>
+                    </Button>
+                </StackPanel>
+                <StackPanel Grid.Row='1'>
+                    <RadioButton x:Name='NavAll' Content='全部笔记' Tag='{StaticResource Icon_All}' Style='{StaticResource NavButtonStyle}' IsChecked='True'/>
+                    <RadioButton x:Name='NavPinned' Content='已置顶' Tag='{StaticResource Icon_Star}' Style='{StaticResource NavButtonStyle}'/>
+                    <RadioButton x:Name='NavTrash' Content='回收站' Tag='{StaticResource Icon_Trash}' Style='{StaticResource NavButtonStyle}'/>
+                </StackPanel>
+                <Button x:Name='BtnNewNote' Grid.Row='2' Height='40' Background='#252525' Foreground='White' BorderThickness='0'>
+                    <Button.Template>
+                        <ControlTemplate TargetType='Button'>
+                            <Border Background='{TemplateBinding Background}' CornerRadius='10'>
+                                <StackPanel Orientation='Horizontal' HorizontalAlignment='Center'>
+                                    <Viewbox Width='14' Height='14' x:Name='NewNoteIcon'><Path Data='{StaticResource Icon_Plus}' Fill='White' Stretch='Uniform'/></Viewbox>
+                                    <TextBlock x:Name='TxtNewNote' Text='新建笔记' VerticalAlignment='Center' Margin='8,0,0,0'/>
+                                </StackPanel>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property='IsMouseOver' Value='True'><Setter Property='Background' Value='#333'/></Trigger>
+                                <Trigger Property='Tag' Value='collapsed'>
+                                    <Setter TargetName='TxtNewNote' Property='Visibility' Value='Collapsed'/>
+                                    <Setter TargetName='NewNoteIcon' Property='Margin' Value='0'/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+            </Grid>
+
+            <!-- Column 1: List -->
+            <Grid Grid.Column='1' Background='#0A0A0A'>
+                <Grid.RowDefinitions><RowDefinition Height='Auto'/><RowDefinition Height='*'/></Grid.RowDefinitions>
+                <Border Grid.Row='0' Background='#1A1A1A' CornerRadius='8' Height='36' Margin='15,20,15,10'>
+                    <Grid>
+                        <TextBlock Text='搜索笔记...' Foreground='#444' Margin='10,0' VerticalAlignment='Center' IsHitTestVisible='False'>
+                            <TextBlock.Style>
+                                <Style TargetType='TextBlock'>
+                                    <Setter Property='Visibility' Value='Collapsed'/>
+                                    <Style.Triggers><DataTrigger Binding='{Binding Text, ElementName=SearchBox}' Value=''><Setter Property='Visibility' Value='Visible'/></DataTrigger></Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBox x:Name='SearchBox' Background='Transparent' BorderThickness='0' Foreground='#CCC' VerticalContentAlignment='Center' Margin='10,0' FontSize='13' CaretBrush='White'/>
+                    </Grid>
+                </Border>
+                <ListBox x:Name='NotesList' Grid.Row='1' Background='Transparent' BorderThickness='0' ItemContainerStyle='{StaticResource NoteItemStyle}' Margin='10,0' ScrollViewer.HorizontalScrollBarVisibility='Disabled'/>
+            </Grid>
+
+            <!-- Column 2: Editor -->
+            <Grid Grid.Column='2' x:Name='EditorPanel'>
+                <Grid.RowDefinitions><RowDefinition Height='60'/><RowDefinition Height='Auto'/><RowDefinition Height='*'/><RowDefinition Height='Auto'/></Grid.RowDefinitions>
+                
+                <!-- Toolbar -->
+                <Grid Grid.Row='0' Margin='30,20,20,0'>
+                    <StackPanel Orientation='Horizontal' HorizontalAlignment='Left'>
+                        <TextBlock x:Name='SaveStatusText' Foreground='#999' FontSize='12' VerticalAlignment='Center' Text='就绪'/>
+                    </StackPanel>
+                    <StackPanel Orientation='Horizontal' HorizontalAlignment='Right'>
+                        <Button x:Name='BtnSync' Background='Transparent' BorderThickness='0' Margin='0,0,10,0' ToolTip='同步到云端' Width='28' Height='28' Cursor='Hand'>
+                            <Viewbox Width='16' Height='16'><Path Data='{StaticResource Icon_Sync}' Fill='#888' Stretch='Uniform'/></Viewbox>
+                        </Button>
+                        <Button x:Name='BtnPin' Background='Transparent' BorderThickness='0' Margin='0,0,10,0' Width='28' Height='28' Cursor='Hand'>
+                            <Viewbox Width='14' Height='14'><Path x:Name='PinIcon' Data='{StaticResource Icon_Pin}' Fill='#888' Stretch='Uniform'/></Viewbox>
+                        </Button>
+                        <Button x:Name='BtnDelete' Background='Transparent' BorderThickness='0' Margin='0,0,10,0' Width='28' Height='28' Cursor='Hand' ToolTip='删除'>
+                            <Viewbox Width='14' Height='14'><Path Data='{StaticResource Icon_Trash}' Fill='#888' Stretch='Uniform'/></Viewbox>
+                        </Button>
+                        <Button x:Name='BtnAI' Content='AI 润色' Foreground='White' Padding='12,5' BorderThickness='0' Cursor='Hand' FontWeight='SemiBold' FontSize='12'>
+                            <Button.Background><StaticResource ResourceKey='GradientAI'/></Button.Background>
+                            <Button.Template>
+                                <ControlTemplate TargetType='Button'>
+                                    <Border Background='{TemplateBinding Background}' CornerRadius='8'>
+                                        <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>
+                                    </Border>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <Button x:Name='BtnClose' Margin='10,0,0,0' Background='Transparent' BorderThickness='0' Width='28' Height='28' Cursor='Hand'>
+                            <Viewbox Width='12' Height='12'><Path Data='{StaticResource Icon_Close}' Fill='#666' Stretch='Uniform'/></Viewbox>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+
+                <TextBox x:Name='TxtTitle' Grid.Row='1' FontSize='24' FontWeight='Bold' Background='Transparent' BorderThickness='0' Foreground='#E0E0E0' Margin='30,0,30,15' CaretBrush='White'/>
+                
+                <Grid Grid.Row='2' Margin='30,0,30,10'>
+                    <TextBox x:Name='TxtContent' AcceptsReturn='True' TextWrapping='Wrap' Background='Transparent' BorderThickness='0' Foreground='#CCC' FontSize='15' VerticalScrollBarVisibility='Auto' CaretBrush='White'/>
+                    <!-- Inner Search Ctrl+F Panel -->
+                    <Border x:Name='InNoteSearchPanel' Visibility='Collapsed' VerticalAlignment='Top' HorizontalAlignment='Right' Background='#2A2A2A' CornerRadius='6' Padding='8' Margin='0,0,20,0'>
+                        <StackPanel Orientation='Horizontal'>
+                            <TextBox x:Name='InNoteSearchBox' Width='150' Background='#1A1A1A' Foreground='White' BorderThickness='0' Padding='5'/>
+                            <Button x:Name='BtnCloseSearch' Content='×' Foreground='#888' Margin='5,0,0,0' Background='Transparent' BorderThickness='0' Width='20'/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+                
+                <TextBlock x:Name='TxtDate' Grid.Row='3' FontSize='12' Foreground='#666' Margin='30,0,30,10' HorizontalAlignment='Right'/>
+            </Grid>
+            <!-- Resize Grip -->
+            <Rectangle x:Name='ResizeGrip' Grid.Column='2' Width='20' Height='20' HorizontalAlignment='Right' VerticalAlignment='Bottom' Fill='Transparent' Cursor='SizeNWSE'/>
         </Grid>
-
-        <StackPanel Grid.Row='2' Orientation='Horizontal' Margin='0,0,0,10'>
-            <TextBlock Text='标题:' VerticalAlignment='Center' Width='40'/>
-            <TextBox x:Name='TxtTitle' Width='450' Background='#2D2D2D' Foreground='White' BorderBrush='#444' Padding='5' VerticalContentAlignment='Center'/>
-            <Button x:Name='BtnPull' Content='从云端恢复' Margin='10,0,0,0' Padding='10,5' Background='#333' Foreground='White' BorderThickness='0'/>
-        </StackPanel>
-
-        <TextBox x:Name='TxtContent' Grid.Row='3' AcceptsReturn='True' TextWrapping='Wrap'
-                 Background='#2D2D2D' Foreground='White' BorderBrush='#444' Padding='10' Margin='0,0,0,20'
-                 FontSize='14' VerticalScrollBarVisibility='Auto'/>
-
-        <StackPanel Grid.Row='4' Orientation='Horizontal' HorizontalAlignment='Right'>
-            <TextBlock x:Name='TxtStatus' Text='就绪' VerticalAlignment='Center' Margin='0,0,20,0' Foreground='#888'/>
-            <Button x:Name='BtnNew' Content='新建' Width='80' Height='35' Margin='0,0,10,0' Background='#444' Foreground='White' BorderThickness='0'/>
-            <Button x:Name='BtnSave' Content='仅保存本地' Width='120' Height='35' Margin='0,0,10,0' Background='#444' Foreground='White' BorderThickness='0'/>
-            <Button x:Name='BtnSync' Content='同步至云端' Width='120' Height='35' Background='#00A0FF' Foreground='White' BorderThickness='0' FontWeight='Bold'/>
-        </StackPanel>
-    </Grid>
+    </Border>
 </Window>";
 
+        // --- 4. 初始化窗口与控件引用 ---
         Window win = (Window)XamlReader.Parse(xaml);
-        win.Activate();
-        win.Topmost = true;
-        win.Topmost = false;
-        win.Focus();
+        win.Width = winWidth; win.Height = winHeight;
+        if (!double.IsNaN(winLeft)) win.Left = winLeft;
+        if (!double.IsNaN(winTop)) win.Top = winTop;
+        
+        var colNav = (ColumnDefinition)win.FindName("ColNav");
+        var appTitle = (TextBlock)win.FindName("AppTitle");
+        var btnNavToggle = (Button)win.FindName("BtnNavToggle");
+        var btnNewNote = (Button)win.FindName("BtnNewNote");
+        var titlePanel = (StackPanel)win.FindName("TitlePanel");
+        
+        var list = (ListBox)win.FindName("NotesList");
+        var txtTitle = (TextBox)win.FindName("TxtTitle");
+        var txtContent = (TextBox)win.FindName("TxtContent");
+        var txtDate = (TextBlock)win.FindName("TxtDate");
+        var saveStatusText = (TextBlock)win.FindName("SaveStatusText");
+        var pinIcon = (System.Windows.Shapes.Path)win.FindName("PinIcon");
+        var searchBox = (TextBox)win.FindName("SearchBox");
+        var inNoteSearchPanel = (Border)win.FindName("InNoteSearchPanel");
+        var inNoteSearchBox = (TextBox)win.FindName("InNoteSearchBox");
 
-        TextBox txtTitle = (TextBox)win.FindName("TxtTitle");
-        TextBox txtContent = (TextBox)win.FindName("TxtContent");
-        Button btnSave = (Button)win.FindName("BtnSave");
-        Button btnSync = (Button)win.FindName("BtnSync");
-        Button btnPull = (Button)win.FindName("BtnPull");
-        Button btnNew = (Button)win.FindName("BtnNew");
-        Button btnRefresh = (Button)win.FindName("BtnRefresh");
-        ComboBox cbHistory = (ComboBox)win.FindName("CbHistory");
-        TextBlock txtStatus = (TextBlock)win.FindName("TxtStatus");
-
-        int? currentNoteId = null;
-
-        Action loadHistory = () =>
-        {
-            var notes = LoadNotes(localNotesFile);
-            cbHistory.ItemsSource = notes;
-            cbHistory.DisplayMemberPath = "title";
-        };
-
-        cbHistory.SelectionChanged += (s, e) =>
-        {
-            JObject note = cbHistory.SelectedItem as JObject;
-            if (note == null)
-            {
-                return;
-            }
-
-            txtTitle.Text = note.Value<string>("title") ?? "";
-            txtContent.Text = note.Value<string>("content") ?? "";
-            currentNoteId = note.Value<int?>("id");
-            txtStatus.Text = "已加载历史笔记: " + (note.Value<string>("title") ?? "未命名");
-        };
-
-        btnRefresh.Click += (s, e) => loadHistory();
-
-        btnNew.Click += (s, e) =>
-        {
-            currentNoteId = null;
-            txtTitle.Text = "新笔记";
-            txtContent.Text = "";
-            cbHistory.SelectedIndex = -1;
-            txtStatus.Text = "已开启新笔记";
-        };
-
-        Action<bool> saveAction = isSync =>
-        {
-            string title = txtTitle.Text ?? "";
-            string content = txtContent.Text ?? "";
-            if (string.IsNullOrWhiteSpace(content))
-            {
-                MessageBox.Show("内容不能为空！");
-                return;
-            }
-
-            txtStatus.Text = "正在保存本地...";
-            var notes = LoadNotes(localNotesFile);
-
-            if (currentNoteId.HasValue)
-            {
-                JObject existing = notes.FirstOrDefault(n => n.Value<int?>("id") == currentNoteId.Value);
-                if (existing != null)
-                {
-                    existing["title"] = title;
-                    existing["content"] = content;
-                    existing["updated_at"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                }
-                else
-                {
-                    currentNoteId = null;
-                }
-            }
-
-            if (!currentNoteId.HasValue)
-            {
-                int nextId = notes.Count == 0 ? 1 : notes.Max(n => n.Value<int?>("id") ?? 0) + 1;
-                var item = new JObject();
-                item["id"] = nextId;
-                item["title"] = title;
-                item["content"] = content;
-                item["updated_at"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                notes.Add(item);
-                currentNoteId = nextId;
-            }
-
-            SaveNotes(localNotesFile, notes);
-
-            if (isSync)
-            {
-                if (string.IsNullOrWhiteSpace(token))
-                {
-                    txtStatus.Text = "未设置 HF_TOKEN";
-                    MessageBox.Show("未检测到 HF_TOKEN 环境变量，无法同步。", "同步失败");
-                }
-                else
-                {
-                    txtStatus.Text = "正在云端备份...";
-                    string error;
-                    bool ok = UploadNotesToHF(token, datasetId, remoteNotesPath, localNotesFile, out error);
-                    if (ok)
-                    {
-                        txtStatus.Text = "云端同步成功 " + DateTime.Now.ToString("HH:mm:ss");
-                        MessageBox.Show("同步成功！");
-                    }
-                    else
-                    {
-                        txtStatus.Text = "云端同步失败";
-                        MessageBox.Show("同步失败: " + error, "同步失败");
-                    }
-                }
-            }
-            else
-            {
-                txtStatus.Text = "本地保存成功 " + DateTime.Now.ToString("HH:mm:ss");
-            }
-
-            loadHistory();
-        };
-
-        btnSave.Click += (s, e) => saveAction(false);
-        btnSync.Click += (s, e) => saveAction(true);
-
-        btnPull.Click += (s, e) =>
-        {
-            if (string.IsNullOrWhiteSpace(token))
-            {
-                MessageBox.Show("未检测到 HF_TOKEN 环境变量，无法拉取。", "拉取失败");
-                return;
-            }
-
-            var result = MessageBox.Show("确定要从云端恢复吗？这会覆盖本地 notes.json。", "确认恢复", MessageBoxButton.YesNo);
-            if (result != MessageBoxResult.Yes)
-            {
-                return;
-            }
-
-            txtStatus.Text = "正在从云端拉取...";
-            string error;
-            bool ok = DownloadNotesFromHF(token, datasetId, remoteNotesPath, localNotesFile, out error);
-            if (ok)
-            {
-                txtStatus.Text = "已同步";
-                loadHistory();
-                MessageBox.Show("云端拉取完成。", "完成");
-            }
-            else
-            {
-                txtStatus.Text = "拉取失败";
-                MessageBox.Show("云端拉取失败: " + error, "拉取失败");
-            }
-        };
-
-        loadHistory();
-        if (cbHistory.Items.Count > 0)
-        {
-            cbHistory.SelectedIndex = 0;
+        // 应用初始折叠状态
+        void UpdateNavVisual(bool collapsed) {
+            colNav.Width = new GridLength(collapsed ? 60 : 200);
+            appTitle.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
+            btnNewNote.Tag = collapsed ? "collapsed" : "expanded";
+            titlePanel.HorizontalAlignment = collapsed ? HorizontalAlignment.Center : HorizontalAlignment.Stretch;
+            titlePanel.Margin = new Thickness(collapsed ? 0 : 10, 0, 0, 30);
         }
-        else
-        {
-            txtTitle.Text = "新笔记";
+        UpdateNavVisual(isNavCollapsed);
+
+        // --- 5. 核心逻辑功能 ---
+
+        bool _isInternalUpdate = false;
+
+        // 加载数据
+        void LoadData() {
+            if (!File.Exists(localNotesFile)) File.WriteAllText(localNotesFile, "[]");
+            var json = File.ReadAllText(localNotesFile);
+            var notes = JsonConvert.DeserializeObject<List<NoteModel>>(json) ?? new List<NoteModel>();
+            noteData.Clear();
+            foreach(var n in notes) noteData.Add(n);
+            RefreshList();
         }
 
+        // 刷新列表
+        void RefreshList() {
+            var query = (searchBox.Text ?? "").ToLower();
+            var filtered = noteData.Where(n => {
+                bool tabMatch = currentFilter == "trash" ? n.IsDeleted : (!n.IsDeleted && (currentFilter == "all" || (currentFilter == "pinned" && n.IsPinned)));
+                bool searchMatch = string.IsNullOrEmpty(query) || (n.Title ?? "").ToLower().Contains(query) || (n.Content ?? "").ToLower().Contains(query);
+                return tabMatch && searchMatch;
+            }).OrderByDescending(n => n.IsPinned).ThenByDescending(n => n.UpdatedAt).ToList();
+            list.ItemsSource = filtered;
+        }
+
+        // 保存逻辑
+        var debounceTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
+        debounceTimer.Tick += (s, e) => {
+            debounceTimer.Stop();
+            SaveToLocal();
+        };
+
+        void SaveToLocal() {
+            if (_isInternalUpdate) return;
+            var selected = list.SelectedItem as NoteModel;
+            if (selected != null && !selected.IsDeleted) {
+                selected.Title = txtTitle.Text;
+                selected.Content = txtContent.Text;
+                selected.UpdatedAt = DateTime.Now;
+            }
+            File.WriteAllText(localNotesFile, JsonConvert.SerializeObject(noteData, Formatting.Indented), new UTF8Encoding(false));
+            saveStatusText.Text = "本地已保存 " + DateTime.Now.ToString("HH:mm:ss");
+        }
+
+        // HF 同步
+        async Task SyncToHF() {
+            if (string.IsNullOrEmpty(token)) {
+                MessageBox.Show("请设置 HF_TOKEN 环境变量");
+                return;
+            }
+            saveStatusText.Text = "正在同步云端...";
+            try {
+                using (var client = new HttpClient()) {
+                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("HFNoteSync/3.0");
+                    
+                    byte[] bytes = File.ReadAllBytes(localNotesFile);
+                    string b64 = Convert.ToBase64String(bytes);
+                    string now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+
+                    string[] lines = new[] {
+                        JsonConvert.SerializeObject(new { key = "header", value = new { summary = "Update notes from HF Note Sync", description = "Sync at " + now } }),
+                        JsonConvert.SerializeObject(new { key = "file", value = new { path = remoteNotesPath, content = b64, encoding = "base64" } })
+                    };
+                    string payload = string.Join("\n", lines) + "\n";
+                    var raw = new ByteArrayContent(Encoding.UTF8.GetBytes(payload));
+                    raw.Headers.ContentType = new MediaTypeHeaderValue("application/x-ndjson");
+                    
+                    var resp = await client.PostAsync($"https://huggingface.co/api/datasets/{datasetId}/commit/main", raw);
+                    if (resp.IsSuccessStatusCode) {
+                        saveStatusText.Text = "云端同步成功 " + DateTime.Now.ToString("HH:mm:ss");
+                    } else {
+                        string body = await resp.Content.ReadAsStringAsync();
+                        saveStatusText.Text = "云端同步失败";
+                        MessageBox.Show("同步失败: " + body);
+                    }
+                }
+            } catch (Exception ex) {
+                saveStatusText.Text = "同步异常";
+                MessageBox.Show(ex.Message);
+            }
+        }
+
+        // --- 6. 事件绑定 ---
+
+        btnNavToggle.Click += (s, e) => {
+            isNavCollapsed = !isNavCollapsed;
+            UpdateNavVisual(isNavCollapsed);
+        };
+
+        ((RadioButton)win.FindName("NavAll")).Checked += (s, e) => { currentFilter = "all"; RefreshList(); };
+        ((RadioButton)win.FindName("NavPinned")).Checked += (s, e) => { currentFilter = "pinned"; RefreshList(); };
+        ((RadioButton)win.FindName("NavTrash")).Checked += (s, e) => { currentFilter = "trash"; RefreshList(); };
+
+        searchBox.TextChanged += (s, e) => RefreshList();
+
+        list.SelectionChanged += (s, e) => {
+            _isInternalUpdate = true;
+            if (list.SelectedItem is NoteModel note) {
+                txtTitle.Text = note.Title;
+                txtContent.Text = note.Content;
+                txtDate.Text = note.UpdatedAt.ToString("yyyy/MM/dd HH:mm");
+                pinIcon.Fill = note.IsPinned ? (Brush)new BrushConverter().ConvertFromString("#E0AB2B") : Brushes.Gray;
+                txtTitle.IsEnabled = true; txtContent.IsEnabled = true;
+            } else {
+                txtTitle.Text = ""; txtContent.Text = ""; txtDate.Text = "";
+                txtTitle.IsEnabled = false; txtContent.IsEnabled = false;
+            }
+            _isInternalUpdate = false;
+        };
+
+        txtTitle.TextChanged += (s, e) => { if(!_isInternalUpdate) { debounceTimer.Stop(); debounceTimer.Start(); } };
+        txtContent.TextChanged += (s, e) => { if(!_isInternalUpdate) { debounceTimer.Stop(); debounceTimer.Start(); } };
+
+        btnNewNote.Click += (s, e) => {
+            var newNote = new NoteModel { Title = "新笔记", Content = "", UpdatedAt = DateTime.Now, Id = Guid.NewGuid().ToString("N") };
+            noteData.Insert(0, newNote);
+            currentFilter = "all";
+            RefreshList();
+            list.SelectedItem = newNote;
+            txtTitle.Focus();
+        };
+
+        ((Button)win.FindName("BtnSync")).Click += async (s, e) => await SyncToHF();
+        
+        ((Button)win.FindName("BtnPin")).Click += (s, e) => {
+            if (list.SelectedItem is NoteModel note) {
+                note.IsPinned = !note.IsPinned;
+                note.UpdatedAt = DateTime.Now;
+                pinIcon.Fill = note.IsPinned ? (Brush)new BrushConverter().ConvertFromString("#E0AB2B") : Brushes.Gray;
+                SaveToLocal();
+                RefreshList();
+                list.SelectedItem = note;
+            }
+        };
+
+        ((Button)win.FindName("BtnDelete")).Click += (s, e) => {
+            if (list.SelectedItem is NoteModel note) {
+                if (currentFilter == "trash") {
+                    if (MessageBox.Show("彻底删除笔记？", "确认", MessageBoxButton.YesNo) == MessageBoxResult.Yes) {
+                        noteData.Remove(note);
+                    }
+                } else {
+                    note.IsDeleted = true;
+                    note.IsPinned = false;
+                }
+                SaveToLocal();
+                RefreshList();
+            }
+        };
+
+        ((Button)win.FindName("BtnAI")).Click += async (s, e) => {
+            var btn = (Button)s;
+            btn.IsEnabled = false; btn.Content = "正在润色...";
+            try {
+                using (var client = new HttpClient()) {
+                    client.Timeout = TimeSpan.FromSeconds(60);
+                    var payload = new {
+                        model = "deepseek-chat",
+                        messages = new[] { 
+                            new { role = "system", content = "你是一个专业的文字润色助手。直接返回润色后的文本，不要解释。" },
+                            new { role = "user", content = txtContent.Text }
+                        }
+                    };
+                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "sk-any");
+                    var content = new StringContent(JsonConvert.SerializeObject(payload), Encoding.UTF8, "application/json");
+                    var resp = await client.PostAsync("http://127.0.0.1:55555/v1/chat/completions", content);
+                    if (resp.IsSuccessStatusCode) {
+                        var resJson = JObject.Parse(await resp.Content.ReadAsStringAsync());
+                        txtContent.Text = resJson["choices"]?[0]?["message"]?["content"]?.ToString();
+                        SaveToLocal();
+                    }
+                }
+            } catch { MessageBox.Show("AI 接口连接失败。请确保 Quicker 转发器已开启。"); }
+            finally { btn.IsEnabled = true; btn.Content = "AI 润色"; }
+        };
+
+        // 窗口管理
+        win.PreviewKeyDown += (s, e) => {
+            if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control) {
+                inNoteSearchPanel.Visibility = Visibility.Visible;
+                inNoteSearchBox.Focus();
+                e.Handled = true;
+            } else if (e.Key == Key.Escape) {
+                inNoteSearchPanel.Visibility = Visibility.Collapsed;
+            }
+        };
+        ((Button)win.FindName("BtnCloseSearch")).Click += (s, e) => inNoteSearchPanel.Visibility = Visibility.Collapsed;
+        ((Button)win.FindName("BtnClose")).Click += (s, e) => win.Close();
+        win.MouseLeftButtonDown += (s, e) => { if (e.OriginalSource is Border) win.DragMove(); };
+
+        // Resize
+        var resizeGrip = (System.Windows.Shapes.Rectangle)win.FindName("ResizeGrip");
+        bool isResizing = false; Point resizeStart = new Point(); Size startSize = new Size();
+        resizeGrip.MouseLeftButtonDown += (s, e) => { isResizing = true; resizeStart = e.GetPosition(win); startSize = new Size(win.Width, win.Height); resizeGrip.CaptureMouse(); e.Handled = true; };
+        resizeGrip.MouseMove += (s, e) => { if (isResizing) { var p = e.GetPosition(win); double w = startSize.Width + (p.X - resizeStart.X); double h = startSize.Height + (p.Y - resizeStart.Y); if (w > 600) win.Width = w; if (h > 400) win.Height = h; } };
+        resizeGrip.MouseLeftButtonUp += (s, e) => { isResizing = false; resizeGrip.ReleaseMouseCapture(); };
+
+        win.Closing += (s, e) => {
+            File.WriteAllText(configFile, $"Width={win.Width}\nHeight={win.Height}\nLeft={win.Left}\nTop={win.Top}\nIsNavCollapsed={isNavCollapsed}");
+            SaveToLocal();
+        };
+
+        // 初始化
+        LoadData();
+        if (noteData.Count > 0) list.SelectedIndex = 0;
+        else txtTitle.IsEnabled = false; txtContent.IsEnabled = false;
+        
         win.Show();
+        win.Activate();
     });
 }
 
-private static void EnsureLocalStore(string localNotesFile)
-{
-    if (File.Exists(localNotesFile))
-    {
-        return;
-    }
-
-    File.WriteAllText(localNotesFile, "[]", new UTF8Encoding(false));
-}
-
-private static List<JObject> LoadNotes(string localNotesFile)
-{
-    EnsureLocalStore(localNotesFile);
-
-    try
-    {
-        string json = File.ReadAllText(localNotesFile, Encoding.UTF8);
-        JArray arr = JArray.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
-        return arr
-            .Children<JObject>()
-            .OrderByDescending(n => ParseUpdatedAt(n.Value<string>("updated_at")))
-            .ToList();
-    }
-    catch
-    {
-        return new List<JObject>();
-    }
-}
-
-private static DateTime ParseUpdatedAt(string value)
-{
-    DateTime dt;
-    if (DateTime.TryParse(value, out dt))
-    {
-        return dt;
-    }
-
-    return DateTime.MinValue;
-}
-
-private static void SaveNotes(string localNotesFile, List<JObject> notes)
-{
-    var ordered = notes
-        .OrderByDescending(n => ParseUpdatedAt(n.Value<string>("updated_at")))
-        .ToList();
-
-    string json = JsonConvert.SerializeObject(ordered, Formatting.Indented);
-    File.WriteAllText(localNotesFile, json, new UTF8Encoding(false));
-}
-
-private static bool DownloadNotesFromHF(string token, string datasetId, string remotePath, string localNotesFile, out string error)
-{
-    error = "";
-    try
-    {
-        string url = "https://huggingface.co/datasets/" + datasetId + "/resolve/main/" + remotePath;
-        using (var client = new HttpClient())
-        {
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("HFNoteSync/2.0");
-            var response = client.GetAsync(url).GetAwaiter().GetResult();
-            if (!response.IsSuccessStatusCode)
-            {
-                error = ((int)response.StatusCode) + " " + response.ReasonPhrase;
-                return false;
-            }
-
-            byte[] content = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
-            File.WriteAllBytes(localNotesFile, content);
-            return true;
-        }
-    }
-    catch (Exception ex)
-    {
-        error = ex.Message;
-        return false;
-    }
-}
-
-private static bool UploadNotesToHF(string token, string datasetId, string remotePath, string localNotesFile, out string error)
-{
-    error = "";
-    try
-    {
-        string url = "https://huggingface.co/api/datasets/" + datasetId + "/commit/main";
-        using (var client = new HttpClient())
-        {
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("HFNoteSync/2.0");
-
-            byte[] bytes = File.ReadAllBytes(localNotesFile);
-            string b64 = Convert.ToBase64String(bytes);
-            string now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
-
-            // Use Hub commit API (NDJSON) to avoid deprecated /upload endpoint.
-            string[] lines = new[]
-            {
-                JsonConvert.SerializeObject(new
-                {
-                    key = "header",
-                    value = new
-                    {
-                        summary = "Update notes.json from Quicker",
-                        description = "HFNoteSync C# commit at " + now
-                    }
-                }),
-                JsonConvert.SerializeObject(new
-                {
-                    key = "file",
-                    value = new
-                    {
-                        path = remotePath,
-                        content = b64,
-                        encoding = "base64"
-                    }
-                })
-            };
-            string payload = string.Join("\n", lines) + "\n";
-
-            var raw = new ByteArrayContent(Encoding.UTF8.GetBytes(payload));
-            raw.Headers.ContentType = new MediaTypeHeaderValue("application/x-ndjson");
-            var response = client.PostAsync(url, raw).GetAwaiter().GetResult();
-            if (!response.IsSuccessStatusCode)
-            {
-                string body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                error = ((int)response.StatusCode) + " " + response.ReasonPhrase + " " + body;
-                return false;
-            }
-
-            return true;
-        }
-    }
-    catch (Exception ex)
-    {
-        error = ex.Message;
-        return false;
-    }
+public class NoteModel : INotifyPropertyChanged {
+    public string Id { get; set; }
+    public string Title { get; set; }
+    public string Content { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public bool IsPinned { get; set; }
+    public bool IsDeleted { get; set; }
+    [JsonIgnore] public string Preview => string.IsNullOrWhiteSpace(Content) ? "暂无内容" : (Content.Length > 40 ? Content.Substring(0, 40).Replace("\r","").Replace("\n", " ") + "..." : Content.Replace("\r","").Replace("\n", " "));
+    public event PropertyChangedEventHandler PropertyChanged;
 }

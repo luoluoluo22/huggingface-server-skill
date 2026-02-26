@@ -7,230 +7,387 @@ from huggingface_hub import HfApi, hf_hub_download
 from datetime import datetime
 import shutil
 from pathlib import Path
+from fastapi.responses import Response
 
 # --- 配置 (优先从环境变量读取) ---
 DATASET_REPO_ID = os.environ.get("DATASET_REPO_ID", "mingyang22/huggingface-notes")
 HF_TOKEN = os.environ.get("HF_TOKEN") # 必须在 Space 设置中配置
-LOCAL_NOTES_PATH = "./notes.json"
-LEGACY_DB_PATH = "./notes.db"
 REMOTE_NOTES_PATH = "db/notes.json"
 
-# --- JSON 存储工具 ---
+APP_MANIFEST = {
+    "name": "HF 笔记 Pro",
+    "short_name": "HF笔记",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0a0a0a",
+    "theme_color": "#3b82f6",
+    "description": "Hugging Face 高级云端同步笔记",
+    "icons": [
+        {
+            "src": "/pwa-icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any maskable"
+        }
+    ],
+}
+
+PWA_ICON_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'>
+<rect width='128' height='128' rx='28' fill='#0a0a0a' stroke='#333' stroke-width='2'/>
+<circle cx='64' cy='64' r='40' fill='url(#grad)'/>
+<defs>
+<linearGradient id='grad' x1='0' y1='0' x2='1' y2='1'>
+<stop offset='0%' stop-color='#7c3aed'/><stop offset='100%' stop-color='#db2777'/>
+</linearGradient>
+</defs>
+<path d='M45 45h38v38H45z' fill='#fff' opacity='0.9'/>
+</svg>"""
+
+PWA_HEAD = """
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#3b82f6" />
+<style>
+/* 玻璃质感与高级深色主题 CSS */
+:root {
+    --bg-dark: #0a0a0a;
+    --accent: #3b82f6;
+    --border: #333333;
+    --text-main: #eeeeee;
+    --text-dim: #888888;
+}
+
+body, .gradio-container {
+    background-color: var(--bg-dark) !important;
+    color: var(--text-main) !important;
+}
+
+/* 隐藏 Gradio 默认页脚 */
+footer { display: none !important; }
+
+/* 侧边栏按钮美化 */
+.nav-btn button {
+    background: transparent !important;
+    border: none !important;
+    text-align: left !important;
+    padding-left: 20px !important;
+    font-size: 16px !important;
+    color: var(--text-dim) !important;
+}
+.nav-btn button:hover {
+    background: #1a1a1a !important;
+    color: white !important;
+}
+.active-nav button {
+    background: #252525 !important;
+    color: white !important;
+    border-left: 3px solid var(--accent) !important;
+}
+
+/* 列表美化 */
+.note-list-item {
+    border-bottom: 1px solid #1a1a1a !important;
+    padding: 15px !important;
+    cursor: pointer;
+}
+.note-list-item:hover {
+    background: #1a1a1a !important;
+}
+
+/* 编辑器美化 */
+#note_title textarea {
+    font-size: 24px !important;
+    font-weight: bold !important;
+    background: transparent !important;
+    border: none !important;
+    color: #e0e0e0 !important;
+}
+#note_content textarea {
+    font-size: 16px !important;
+    background: transparent !important;
+    border: none !important;
+    color: #cccccc !important;
+}
+
+/* AI 按钮渐变 */
+#ai_btn {
+    background: linear-gradient(135deg, #7c3aed 0%, #db2777 100%) !important;
+    border: none !important;
+    font-weight: bold !important;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #444; }
+</style>
+"""
+
+def get_default_data_dir():
+    # 如果在 Space 环境，优先使用当前目录下的 cache_data 文件夹，避免 /root 权限问题
+    if os.environ.get("SPACE_ID") or os.environ.get("HF_SPACE"):
+        return str(Path.cwd() / "cache_data")
+        
+    custom_dir = os.environ.get("HF_NOTES_DATA_DIR")
+    if custom_dir: return custom_dir
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return str(Path(base) / "hf-note-app-pro")
+
+DATA_DIR = get_default_data_dir()
+LOCAL_NOTES_PATH = str(Path(DATA_DIR) / "notes.json")
+
 def ensure_local_notes():
+    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
     p = Path(LOCAL_NOTES_PATH)
     if not p.exists():
-        migrate_from_legacy_db()
-        if not p.exists():
-            p.write_text("[]", encoding="utf-8")
-
-def migrate_from_legacy_db():
-    if not os.path.exists(LEGACY_DB_PATH):
-        return
-    try:
-        conn = sqlite3.connect(LEGACY_DB_PATH, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT id, title, content, updated_at FROM notes ORDER BY updated_at DESC"
-        ).fetchall()
-        conn.close()
-        notes = [
-            {
-                "id": int(r["id"]),
-                "title": str(r["title"] or ""),
-                "content": str(r["content"] or ""),
-                "updated_at": str(r["updated_at"] or ""),
-            }
-            for r in rows
-        ]
-        write_notes(notes)
-        print(f"✅ 已从旧版 notes.db 迁移 {len(notes)} 条记录到 notes.json")
-    except Exception as e:
-        print(f"⚠️ 旧版 notes.db 迁移失败: {e}")
+        p.write_text("[]", encoding="utf-8")
 
 def read_notes():
     ensure_local_notes()
     try:
-        # Use utf-8-sig to tolerate BOM-prefixed JSON from external clients.
         data = json.loads(Path(LOCAL_NOTES_PATH).read_text(encoding="utf-8-sig"))
         if isinstance(data, list):
-            notes = []
+            valid_notes = []
             for item in data:
-                if not isinstance(item, dict):
-                    continue
-                notes.append(
-                    {
-                        "id": int(item.get("id", 0)),
-                        "title": str(item.get("title", "")),
-                        "content": str(item.get("content", "")),
-                        "updated_at": str(item.get("updated_at", "")),
-                    }
-                )
-            return notes
-    except Exception:
-        pass
+                if not isinstance(item, dict): continue
+                # 关键修复：同时支持 C# 风格 (Uppercase) 和 Python 风格 (Lowercase) 的键名
+                n_id = item.get("Id") or item.get("id", "")
+                n_title = item.get("Title") or item.get("title", "")
+                n_content = item.get("Content") or item.get("content", "")
+                n_updated = item.get("UpdatedAt") or item.get("updated_at", "")
+                n_pinned = item.get("IsPinned") if "IsPinned" in item else item.get("is_pinned", False)
+                n_deleted = item.get("IsDeleted") if "IsDeleted" in item else item.get("is_deleted", False)
+
+                valid_notes.append({
+                    "id": str(n_id),
+                    "title": str(n_title),
+                    "content": str(n_content),
+                    "updated_at": str(n_updated),
+                    "is_pinned": bool(n_pinned),
+                    "is_deleted": bool(n_deleted)
+                })
+            return valid_notes
+    except Exception as e:
+        print(f"读取笔记失败: {e}")
     return []
 
 def write_notes(notes):
+    ensure_local_notes()
     Path(LOCAL_NOTES_PATH).write_text(
         json.dumps(notes, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-# --- 持久化管理 (云端同步) ---
+# --- 持久化管理 ---
 class CloudSync:
     def __init__(self):
         self.api = HfApi(token=HF_TOKEN)
     
     def pull(self):
-        """从 Dataset 下载最新的 notes.json"""
-        print(f"🔄 正在从云端拉取数据: {DATASET_REPO_ID}...")
         try:
+            ensure_local_notes()
+            print(f"🔄 正在从 Dataset {DATASET_REPO_ID} 拉取 {REMOTE_NOTES_PATH}...")
             downloaded_path = hf_hub_download(
                 repo_id=DATASET_REPO_ID,
                 filename=REMOTE_NOTES_PATH,
                 repo_type="dataset",
                 token=HF_TOKEN,
-                force_download=True,  # 同步核心：跳过本地缓存
+                force_download=True,
                 revision="main",
             )
             shutil.copy(downloaded_path, LOCAL_NOTES_PATH)
-            return f"✅ 数据拉取成功 ({datetime.now().strftime('%H:%M:%S')})"
+            return True, f"✅ 云端拉取同步完成"
         except Exception as e:
-            print(f"⚠️ 拉取失败: {e}")
-            ensure_local_notes()
-            return "ℹ️ 云端暂无 notes.json 或拉取失败。"
+            msg = str(e)
+            print(f"拉取失败详情: {msg}")
+            # 如果是 401/404，通常是 Token 没设或权限问题
+            if "401" in msg or "404" in msg:
+                return False, f"⚠️ 拉取失败: 请检查 Space 的 HF_TOKEN 是否已正确配置 (Dataset 可能为私有)"
+            return False, f"⚠️ 拉取失败: {msg}"
 
     def push(self):
-        """将本地 notes.json 上传到 Dataset"""
-        if not os.path.exists(LOCAL_NOTES_PATH):
-            return "❌ 本地 notes.json 丢失"
-            
-        file_size = os.path.getsize(LOCAL_NOTES_PATH)
-        print(f"📤 正在上传数据到云端 (Size: {file_size} bytes): {DATASET_REPO_ID}...")
+        ensure_local_notes()
+        if not os.path.exists(LOCAL_NOTES_PATH): return False, "❌ 文件丢失"
         try:
             self.api.upload_file(
                 path_or_fileobj=LOCAL_NOTES_PATH,
                 path_in_repo=REMOTE_NOTES_PATH,
                 repo_id=DATASET_REPO_ID,
                 repo_type="dataset",
-                commit_message=f"Web update Size({file_size}) at {datetime.now().strftime('%H:%M:%S')}"
+                commit_message=f"Web Update Pro at {datetime.now().strftime('%H:%M:%S')}"
             )
-            return f"✅ 云端备份已更新 ({datetime.now().strftime('%H:%M:%S')})"
+            return True, "✅ 已备份至云端"
         except Exception as e:
-            return f"❌ 备份失败: {e}"
+            return False, f"❌ 备份失败: {e}"
 
 sync_manager = CloudSync()
 
 # --- 业务逻辑 ---
-def load_notes_list():
-    notes = sorted(read_notes(), key=lambda x: x.get("updated_at", ""), reverse=True)
-    df = pd.DataFrame(
-        [
-            {
-                "id": str(n.get("id", "")),
-                "title": n.get("title", ""),
-                "updated_at": n.get("updated_at", ""),
-            }
-            for n in notes
-        ]
-    )
-    if df.empty:
-        return [["(空)", "请创建您的第一条笔记", ""]]
-    return df.values.tolist()
+def load_notes_list(filter_type="all", search_query=""):
+    notes = read_notes()
+    query = search_query.lower() if search_query else ""
+    
+    filtered = []
+    for n in notes:
+        # Tab 过滤
+        is_deleted = n.get("is_deleted", False)
+        is_pinned = n.get("is_pinned", False)
+        
+        if filter_type == "trash":
+            if not is_deleted: continue
+        else:
+            if is_deleted: continue
+            if filter_type == "pinned" and not is_pinned: continue
+            
+        # 搜索过滤
+        if query and query not in n["title"].lower() and query not in n["content"].lower():
+            continue
+        
+        filtered.append(n)
+        
+    # 排序：置顶优先，时间倒序
+    sorted_notes = sorted(filtered, key=lambda x: (x.get("is_pinned", False), x.get("updated_at", "")), reverse=True)
+    
+    return [
+        [n["id"], f"{'📌 ' if n.get('is_pinned') else ''}{n['title'] or '未命名'}", n["updated_at"]]
+        for n in sorted_notes
+    ]
 
-def get_note_content(note_id):
-    if not note_id or note_id == "(空)":
-        return "", ""
+def get_note_detail(note_id):
+    if not note_id: return "", "", ""
     notes = read_notes()
     for n in notes:
-        if str(n.get("id")) == str(note_id):
-            return n.get("title", ""), n.get("content", "")
-    return "", ""
+        if n["id"] == note_id:
+            return n["title"], n["content"], n["updated_at"]
+    return "", "", ""
 
-def save_note(note_id, title, content):
-    if not title: return "❌ 标题不能为空", load_notes_list()
-
+def handle_save(note_id, title, content):
+    if not title and not content: return "无内容可保存", load_notes_list()
     notes = read_notes()
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    if note_id and str(note_id).isdigit():
-        target = None
-        for n in notes:
-            if int(n.get("id", -1)) == int(note_id):
-                target = n
-                break
-        if target:
-            target["title"] = title
-            target["content"] = content
-            target["updated_at"] = now
-        else:
-            next_id = (max([int(n.get("id", 0)) for n in notes]) + 1) if notes else 1
-            notes.append({"id": next_id, "title": title, "content": content, "updated_at": now})
-        msg = "📝 笔记已更新 (本地)"
-    else:
-        next_id = (max([int(n.get("id", 0)) for n in notes]) + 1) if notes else 1
-        notes.append({"id": next_id, "title": title, "content": content, "updated_at": now})
-        msg = "✨ 笔记已创建 (本地)"
-    write_notes(notes)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # 自动触发云端同步备份
-    backup_msg = sync_manager.push()
-    return f"{msg} | {backup_msg}", load_notes_list()
-
-def delete_note(note_id):
-    if not note_id: return "请选择笔记", load_notes_list()
-    notes = [n for n in read_notes() if str(n.get("id")) != str(note_id)]
-    write_notes(notes)
-    backup_msg = sync_manager.push()
-    return f"🗑️ 笔记已删除 | {backup_msg}", load_notes_list()
-
-# --- Gradio UI 界面 ---
-with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
-    gr.Markdown("# 📓 Hugging Face 个人笔记云端版")
-    gr.Markdown("实时同步本地 Quicker 动作数据。数据由私有 Dataset 承载，安全、持久、版本可追溯。")
-    
-    with gr.Row():
-        with gr.Column(scale=1):
-            note_list = gr.Dataframe(
-                headers=["ID", "标题", "最后修改"],
-                datatype=["str", "str", "str"],
-                value=load_notes_list(),
-                interactive=False,
-                label="我的笔记列表"
-            )
-            btn_refresh = gr.Button("🔄 刷新并手动拉取云端", variant="secondary")
-            status_output = gr.Markdown("系统就绪")
+    found = False
+    for n in notes:
+        if n["id"] == note_id:
+            n["title"], n["content"], n["updated_at"] = title, content, now
+            found = True
+            break
             
-        with gr.Column(scale=2):
-            with gr.Group():
-                target_id = gr.Textbox(visible=False)
-                in_title = gr.Textbox(label="标题", placeholder="输入笔记标题...")
-                in_content = gr.TextArea(label="正文内容", lines=15, placeholder="记录您的想法...")
-                
-                with gr.Row():
-                    btn_save = gr.Button("💾 保存并推送到云端", variant="primary")
-                    btn_new = gr.Button("➕ 新建笔记")
-                    btn_del = gr.Button("🗑️ 删除笔记", variant="stop")
+    if not found:
+        new_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        new_note = {
+            "id": new_id,
+            "title": title or "新笔记",
+            "content": content,
+            "updated_at": now,
+            "is_pinned": False,
+            "is_deleted": False
+        }
+        notes.insert(0, new_note)
+        note_id = new_id
+        
+    write_notes(notes)
+    _, msg = sync_manager.push()
+    return f"已本地保存 | {msg}", load_notes_list(), note_id
 
-    # 事件绑定
-    def on_select(evt: gr.SelectData):
-        # evt.index[0] 是行号
-        df = load_notes_list()
-        selected_id = df[evt.index[0]][0]
-        title, content = get_note_content(selected_id)
-        return selected_id, title, content
+def handle_delete(note_id, current_filter):
+    if not note_id: return "未选择笔记", load_notes_list(current_filter), ""
+    notes = read_notes()
+    for n in notes:
+        if n["id"] == note_id:
+            if current_filter == "trash":
+                notes.remove(n)
+            else:
+                n["is_deleted"] = True
+                n["is_pinned"] = False
+            break
+    write_notes(notes)
+    sync_manager.push()
+    return "已移至回收站" if current_filter != "trash" else "已彻底删除", load_notes_list(current_filter), ""
 
-    note_list.select(on_select, None, [target_id, in_title, in_content])
-    
-    btn_save.click(save_note, [target_id, in_title, in_content], [status_output, note_list])
-    
-    btn_new.click(lambda: (None, "新笔记", ""), None, [target_id, in_title, in_content])
-    
-    btn_del.click(delete_note, [target_id], [status_output, note_list])
-    
-    btn_refresh.click(lambda: (sync_manager.pull(), load_notes_list()), None, [status_output, note_list])
+def handle_pin(note_id, current_filter):
+    if not note_id: return load_notes_list(current_filter)
+    notes = read_notes()
+    for n in notes:
+        if n["id"] == note_id:
+            n["is_pinned"] = not n.get("is_pinned", False)
+            break
+    write_notes(notes)
+    backup_msg = sync_manager.push()[1]
+    return load_notes_list(current_filter)
 
-    # 启动时自动从云端拉取
-    demo.load(lambda: (sync_manager.pull(), load_notes_list()), None, [status_output, note_list])
+# --- Gradio UI ---
+with gr.Blocks(theme=gr.themes.Default(), head=PWA_HEAD) as demo:
+    current_filter_state = gr.State("all")
+    selected_note_id = gr.State("")
+    
+    with gr.Row(equal_height=True):
+        # 1. 导航栏 (ClassNote 风格)
+        with gr.Column(scale=1, min_width=150):
+            gr.HTML("<div style='font-size: 20px; font-weight: bold; margin-bottom: 30px; color: white;'>HF Note</div>")
+            btn_all = gr.Button("全部笔记", variant="secondary", elem_classes=["nav-btn", "active-nav"])
+            btn_pinned = gr.Button("已置顶", variant="secondary", elem_classes=["nav-btn"])
+            btn_trash = gr.Button("回收站", variant="secondary", elem_classes=["nav-btn"])
+            
+            gr.Markdown("---")
+            btn_new = gr.Button("➕ 新建笔记", variant="secondary")
+            btn_sync_pull = gr.Button("🔄 同步云端", variant="secondary")
+            
+        # 2. 列表栏
+        with gr.Column(scale=2, min_width=250):
+            search_box = gr.Textbox(placeholder="搜索笔记...", show_label=False, elem_id="search_box")
+            note_list = gr.Dataframe(
+                headers=["ID", "标题", "时间"],
+                datatype=["str", "str", "str"],
+                col_count=(3, "fixed"),
+                interactive=False,
+                label=None,
+            )
+            status_text = gr.Markdown("就绪")
+            
+        # 3. 编辑器栏
+        with gr.Column(scale=4):
+            with gr.Row():
+                btn_pin = gr.Button("📌 置顶", variant="secondary", size="sm")
+                btn_del = gr.Button("🗑️ 删除", variant="stop", size="sm")
+                btn_ai = gr.Button("AI 润色", variant="primary", size="sm", elem_id="ai_btn")
+            
+            edit_title = gr.Textbox(placeholder="无标题笔记", show_label=False, elem_id="note_title")
+            edit_content = gr.TextArea(placeholder="暂无内容，开始输入...", show_label=False, lines=25, elem_id="note_content")
+            edit_date = gr.Markdown("", elem_id="note_date")
+
+    # --- 交互事件 ---
+    
+    def on_note_select(evt: gr.SelectData, filt):
+        curr_list = load_notes_list(filt)
+        note_id = curr_list[evt.index[0]][0]
+        title, content, date = get_note_detail(note_id)
+        return note_id, title, content, f"最后修改: {date}"
+
+    note_list.select(on_note_select, [current_filter_state], [selected_note_id, edit_title, edit_content, edit_date])
+    
+    search_box.change(load_notes_list, [current_filter_state, search_box], [note_list])
+    
+    # 离开焦点时保存
+    edit_title.blur(handle_save, [selected_note_id, edit_title, edit_content], [status_text, note_list, selected_note_id])
+    edit_content.blur(handle_save, [selected_note_id, edit_title, edit_content], [status_text, note_list, selected_note_id])
+    
+    btn_new.click(lambda: ("", "新笔记", "", ""), None, [selected_note_id, edit_title, edit_content, edit_date])
+    btn_pin.click(handle_pin, [selected_note_id, current_filter_state], [note_list])
+    btn_del.click(handle_delete, [selected_note_id, current_filter_state], [status_text, note_list, selected_note_id])
+    
+    btn_sync_pull.click(lambda: (sync_manager.pull()[1], load_notes_list()), None, [status_text, note_list])
+    
+    def ai_polish(content):
+        if not content: return content
+        return f"✨ [AI 润色已模拟完成]\n\n{content}\n\n(请在本地动作中使用完整的 DeepSeek 润色服务)"
+    btn_ai.click(ai_polish, [edit_content], [edit_content])
+
+    # 启动拉取
+    demo.load(lambda: (sync_manager.pull()[1], load_notes_list()), None, [status_text, note_list])
 
 if __name__ == "__main__":
     demo.launch()
