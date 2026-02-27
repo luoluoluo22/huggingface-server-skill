@@ -1,50 +1,18 @@
 import gradio as gr
 import os
 import json
-import sqlite3
-import pandas as pd
 from huggingface_hub import HfApi, hf_hub_download
 from datetime import datetime
 import shutil
 from pathlib import Path
-from fastapi.responses import Response
+from uuid import uuid4
 
 # --- 配置 (优先从环境变量读取) ---
 DATASET_REPO_ID = os.environ.get("DATASET_REPO_ID", "mingyang22/huggingface-notes")
 HF_TOKEN = os.environ.get("HF_TOKEN") # 必须在 Space 设置中配置
 REMOTE_NOTES_PATH = "db/notes.json"
 
-APP_MANIFEST = {
-    "name": "HF 笔记 Pro",
-    "short_name": "HF笔记",
-    "start_url": "/",
-    "display": "standalone",
-    "background_color": "#0a0a0a",
-    "theme_color": "#3b82f6",
-    "description": "Hugging Face 高级云端同步笔记",
-    "icons": [
-        {
-            "src": "/pwa-icon.svg",
-            "sizes": "any",
-            "type": "image/svg+xml",
-            "purpose": "any maskable"
-        }
-    ],
-}
-
-PWA_ICON_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'>
-<rect width='128' height='128' rx='28' fill='#0a0a0a' stroke='#333' stroke-width='2'/>
-<circle cx='64' cy='64' r='40' fill='url(#grad)'/>
-<defs>
-<linearGradient id='grad' x1='0' y1='0' x2='1' y2='1'>
-<stop offset='0%' stop-color='#7c3aed'/><stop offset='100%' stop-color='#db2777'/>
-</linearGradient>
-</defs>
-<path d='M45 45h38v38H45z' fill='#fff' opacity='0.9'/>
-</svg>"""
-
 PWA_HEAD = """
-<link rel="manifest" href="/manifest.webmanifest" />
 <meta name="theme-color" content="#3b82f6" />
 <style>
 /* 玻璃质感与高级深色主题 CSS */
@@ -264,20 +232,22 @@ def get_note_detail(note_id):
             return n["title"], n["content"], n["updated_at"]
     return "", "", ""
 
-def handle_save(note_id, title, content):
-    if not title and not content: return "无内容可保存", load_notes_list()
+def handle_save(note_id, title, content, push_cloud=False):
+    if not title and not content:
+        return "无内容可保存", load_notes_list(), note_id
+
     notes = read_notes()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+
     found = False
     for n in notes:
         if n["id"] == note_id:
             n["title"], n["content"], n["updated_at"] = title, content, now
             found = True
             break
-            
+
     if not found:
-        new_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        new_id = uuid4().hex
         new_note = {
             "id": new_id,
             "title": title or "新笔记",
@@ -288,10 +258,16 @@ def handle_save(note_id, title, content):
         }
         notes.insert(0, new_note)
         note_id = new_id
-        
+
     write_notes(notes)
-    _, msg = sync_manager.push()
-    return f"已本地保存 | {msg}", load_notes_list(), note_id
+
+    if push_cloud:
+        _, msg = sync_manager.push()
+        status = f"已保存并同步 | {msg}"
+    else:
+        status = "已自动保存到本地"
+
+    return status, load_notes_list(), note_id
 
 def handle_delete(note_id, current_filter):
     if not note_id: return "未选择笔记", load_notes_list(current_filter), ""
@@ -316,7 +292,7 @@ def handle_pin(note_id, current_filter):
             n["is_pinned"] = not n.get("is_pinned", False)
             break
     write_notes(notes)
-    backup_msg = sync_manager.push()[1]
+    sync_manager.push()
     return load_notes_list(current_filter)
 
 # --- Gradio UI ---
@@ -351,6 +327,7 @@ with gr.Blocks(theme=gr.themes.Default(), head=PWA_HEAD) as demo:
         # 3. 编辑器栏
         with gr.Column(scale=4):
             with gr.Row():
+                btn_save = gr.Button("💾 保存", variant="primary", size="sm")
                 btn_pin = gr.Button("📌 置顶", variant="secondary", size="sm")
                 btn_del = gr.Button("🗑️ 删除", variant="stop", size="sm")
                 btn_ai = gr.Button("AI 润色", variant="primary", size="sm", elem_id="ai_btn")
@@ -360,27 +337,61 @@ with gr.Blocks(theme=gr.themes.Default(), head=PWA_HEAD) as demo:
             edit_date = gr.Markdown("", elem_id="note_date")
 
     # --- 交互事件 ---
-    
+
     def on_note_select(evt: gr.SelectData, filt):
         curr_list = load_notes_list(filt)
+        if not curr_list or not evt.index or evt.index[0] >= len(curr_list):
+            return "", "", "", ""
         note_id = curr_list[evt.index[0]][0]
         title, content, date = get_note_detail(note_id)
         return note_id, title, content, f"最后修改: {date}"
 
+    def handle_autosave(note_id, title, content):
+        return handle_save(note_id, title, content, push_cloud=False)
+
+    def handle_manual_save(note_id, title, content):
+        return handle_save(note_id, title, content, push_cloud=True)
+
+    def switch_filter(filter_type, search_query):
+        return (
+            filter_type,
+            load_notes_list(filter_type, search_query),
+            "",
+            "",
+            "",
+            "",
+            f"已切换到：{filter_type}"
+        )
+
+    def switch_all(search_query):
+        return switch_filter("all", search_query)
+
+    def switch_pinned(search_query):
+        return switch_filter("pinned", search_query)
+
+    def switch_trash(search_query):
+        return switch_filter("trash", search_query)
+
     note_list.select(on_note_select, [current_filter_state], [selected_note_id, edit_title, edit_content, edit_date])
-    
+
     search_box.change(load_notes_list, [current_filter_state, search_box], [note_list])
-    
+
     # 离开焦点时保存
-    edit_title.blur(handle_save, [selected_note_id, edit_title, edit_content], [status_text, note_list, selected_note_id])
-    edit_content.blur(handle_save, [selected_note_id, edit_title, edit_content], [status_text, note_list, selected_note_id])
-    
+    edit_title.blur(handle_autosave, [selected_note_id, edit_title, edit_content], [status_text, note_list, selected_note_id])
+    edit_content.blur(handle_autosave, [selected_note_id, edit_title, edit_content], [status_text, note_list, selected_note_id])
+    # 显式保存按钮（PWA/移动端更可靠）
+    btn_save.click(handle_manual_save, [selected_note_id, edit_title, edit_content], [status_text, note_list, selected_note_id])
+
+    btn_all.click(switch_all, [search_box], [current_filter_state, note_list, selected_note_id, edit_title, edit_content, edit_date, status_text])
+    btn_pinned.click(switch_pinned, [search_box], [current_filter_state, note_list, selected_note_id, edit_title, edit_content, edit_date, status_text])
+    btn_trash.click(switch_trash, [search_box], [current_filter_state, note_list, selected_note_id, edit_title, edit_content, edit_date, status_text])
+
     btn_new.click(lambda: ("", "新笔记", "", ""), None, [selected_note_id, edit_title, edit_content, edit_date])
     btn_pin.click(handle_pin, [selected_note_id, current_filter_state], [note_list])
     btn_del.click(handle_delete, [selected_note_id, current_filter_state], [status_text, note_list, selected_note_id])
-    
+
     btn_sync_pull.click(lambda: (sync_manager.pull()[1], load_notes_list()), None, [status_text, note_list])
-    
+
     def ai_polish(content):
         if not content: return content
         return f"✨ [AI 润色已模拟完成]\n\n{content}\n\n(请在本地动作中使用完整的 DeepSeek 润色服务)"
