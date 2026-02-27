@@ -6,11 +6,13 @@ from datetime import datetime
 import shutil
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 # --- 配置 (优先从环境变量读取) ---
 DATASET_REPO_ID = os.environ.get("DATASET_REPO_ID", "mingyang22/huggingface-notes")
 HF_TOKEN = os.environ.get("HF_TOKEN") # 必须在 Space 设置中配置
 REMOTE_NOTES_PATH = "db/notes.json"
+BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 PWA_HEAD = """
 <meta name="theme-color" content="#3b82f6" />
@@ -149,6 +151,9 @@ def write_notes(notes):
         encoding="utf-8",
     )
 
+def now_beijing():
+    return datetime.now(BEIJING_TZ)
+
 # --- 持久化管理 ---
 class CloudSync:
     def __init__(self):
@@ -185,7 +190,7 @@ class CloudSync:
                 path_in_repo=REMOTE_NOTES_PATH,
                 repo_id=DATASET_REPO_ID,
                 repo_type="dataset",
-                commit_message=f"Web Update Pro at {datetime.now().strftime('%H:%M:%S')}"
+                commit_message=f"Web Update Pro at {now_beijing().strftime('%Y-%m-%d %H:%M:%S %z')}"
             )
             return True, "✅ 已备份至云端"
         except Exception as e:
@@ -237,7 +242,7 @@ def handle_save(note_id, title, content, push_cloud=False):
         return "无内容可保存", load_notes_list(), note_id
 
     notes = read_notes()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_beijing().isoformat(timespec="seconds")
 
     found = False
     for n in notes:
